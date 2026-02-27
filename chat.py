@@ -7,7 +7,6 @@ from scipy.spatial import distance as dist
 import time
 import os
 import urllib.request
-import pyttsx3
 import threading
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
@@ -378,17 +377,8 @@ def get_audio_html(file_path):
     except Exception as e:
         return ""
 
-def speak_alert(text):
-    def speech_task():
-        try:
-            import pythoncom
-            pythoncom.CoInitialize()
-            engine = pyttsx3.init()
-            engine.say(text)
-            engine.runAndWait()
-        except:
-            pass
-    threading.Thread(target=speech_task, daemon=True).start()
+# Removed speak_alert due to server-side hardware limitations on Streamlit Cloud.
+# We use browser-side Speech Synthesis (JavaScript) instead.
 
 # -- Page UI --
 st.markdown("""
@@ -403,7 +393,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.write("") # small spacer
-st.sidebar.title("Telemetry Control")
+st.sidebar.title("Telemetry Control") 
 st.sidebar.markdown("Engage the systems below to begin.")
 
 if 'run_app' not in st.session_state:
@@ -434,13 +424,9 @@ col_video, col_metrics, col_padding = st.columns([3, 1.2, 0.2], gap="large")
 # --- Dashboard Layout ---
 col_video, col_metrics, col_padding = st.columns([3, 1.2, 0.2], gap="large")
 
-RTC_CONFIGURATION = {"iceServers": [
-    {"urls": ["stun:stun.l.google.com:19302"]},
-    {"urls": ["stun:stun1.l.google.com:19302"]},
-    {"urls": ["stun:stun2.l.google.com:19302"]},
-    {"urls": ["stun:stun3.l.google.com:19302"]},
-    {"urls": ["stun:stun4.l.google.com:19302"]}
-]}
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
 
 with col_video:
     st.markdown("### Live Feed Monitor")
@@ -467,33 +453,37 @@ class VideoProcessor:
         rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         h, w, _ = img.shape
         
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-        results = face_mesh.detect(mp_image)
-
         eyes_found = False
         yawn_detected_current = False
         face_detected_last = False
 
-        if results.face_landmarks:
-            face_detected_last = True
-            landmarks = results.face_landmarks[0]
+        try:
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+            results = face_mesh.detect(mp_image)
 
-            left_ear = calculate_ear(landmarks, LEFT_EYE, w, h)
-            right_ear = calculate_ear(landmarks, RIGHT_EYE, w, h)
-            avg_ear = (left_ear + right_ear) / 2.0
+            if results.face_landmarks:
+                face_detected_last = True
+                landmarks = results.face_landmarks[0]
 
-            if avg_ear > 0.21: 
-                eyes_found = True
+                left_ear = calculate_ear(landmarks, LEFT_EYE, w, h)
+                right_ear = calculate_ear(landmarks, RIGHT_EYE, w, h)
+                avg_ear = (left_ear + right_ear) / 2.0
 
-            mar = calculate_mar(landmarks, LIPS, w, h)
-            
-            if mar > 0.45:
-                yawn_detected_current = True
-                cv2.putText(img, "YAWN DETECTED", (30, 80), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 0, 127), 2)
+                if avg_ear > 0.21: 
+                    eyes_found = True
 
-            for idx in LEFT_EYE + RIGHT_EYE + LIPS:
-                pt = (int(landmarks[idx].x * w), int(landmarks[idx].y * h))
-                cv2.circle(img, pt, 2, (0, 255, 204), -1)
+                mar = calculate_mar(landmarks, LIPS, w, h)
+                
+                if mar > 0.45:
+                    yawn_detected_current = True
+                    cv2.putText(img, "YAWN DETECTED", (30, 80), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 0, 127), 2)
+
+                for idx in LEFT_EYE + RIGHT_EYE + LIPS:
+                    pt = (int(landmarks[idx].x * w), int(landmarks[idx].y * h))
+                    cv2.circle(img, pt, 2, (0, 255, 204), -1)
+        except Exception as e:
+            # Fallback if MediaPipe fails
+            pass
 
         if face_detected_last:
             if not eyes_found:
@@ -541,11 +531,7 @@ with col_video:
         rtc_configuration=RTC_CONFIGURATION,
         video_processor_factory=VideoProcessor,
         media_stream_constraints={
-            "video": {
-                "width": {"ideal": 640, "max": 800},
-                "height": {"ideal": 480, "max": 600},
-                "frameRate": {"ideal": 15, "max": 30}
-            }, 
+            "video": True, 
             "audio": False
         },
         async_processing=True,
@@ -555,67 +541,66 @@ with col_video:
 if run_app:
     # Continuous loop to poll the video processor and update the Streamlit UI metrics and audio/speech
     if ctx and ctx.state.playing:
-        while True:
-            if ctx.video_processor:
-                closed = ctx.video_processor.closed_frames
-                yawn = ctx.video_processor.yawn_frames
-                
-                drowsy_ui.markdown(
-                    f"""
-                    <div class="metric-card">
-                        <div class="metric-value">{closed} <span class="metric-value-span">/ {CLOSED_FRAME_THRESHOLD}</span></div>
-                        <div class="metric-label">Eye Closure</div>
-                    </div>
-                    """, unsafe_allow_html=True
-                )
-                
-                yawn_ui.markdown(
-                    f"""
-                    <div class="metric-card">
-                        <div class="metric-value">{int(yawn)} <span class="metric-value-span">/ {YAWN_FRAME_THRESHOLD}</span></div>
-                        <div class="metric-label">Yawn Events</div>
-                    </div>
-                    """, unsafe_allow_html=True
-                )
-                
-                if closed >= CLOSED_FRAME_THRESHOLD or yawn >= YAWN_FRAME_THRESHOLD:
-                    alert_type = "SLEEP DETECTED" if closed >= CLOSED_FRAME_THRESHOLD else "FATIGUE (YAWN)"
-                    status_ui.markdown(f'<div class="status-alert">⚠️ {alert_type}</div>', unsafe_allow_html=True)
-                    
-                    if not st.session_state.alarm_on:
-                        st.session_state.alarm_on = True
-                        
-                        # Browser Web Speech API
-                        speech_text = "Drowsy detects." if closed >= CLOSED_FRAME_THRESHOLD else "Yawn detects."
-                        js_speech = f"""
-                        <script>
-                            var msg = new SpeechSynthesisUtterance("{speech_text}");
-                            var voices = window.speechSynthesis.getVoices();
-                            var maleVoice = voices.find(v => 
-                                v.name.toLowerCase().includes('male') || 
-                                v.name.toLowerCase().includes('david') || 
-                                v.name.toLowerCase().includes('mark') ||
-                                v.name.toLowerCase().includes('andrew') ||
-                                v.name.toLowerCase().includes('daniel') ||
-                                v.name.toLowerCase().includes('guy') ||
-                                v.name.toLowerCase().includes('george')
-                            );
-                            if (maleVoice) {{
-                                msg.voice = maleVoice;
-                            }}
-                            msg.pitch = 0.8; 
-                            window.speechSynthesis.speak(msg);
-                        </script>
-                        """
-                        
-                        audio_html = get_audio_html("alarm.wav")
-                        audio_placeholder.markdown(audio_html + js_speech, unsafe_allow_html=True)
-                else:
-                    st.session_state.alarm_on = False
-                    audio_placeholder.empty()
-                    status_ui.markdown('<div class="status-ok">WEBRTC SYSTEM NOMINAL</div>', unsafe_allow_html=True)
+        if ctx.video_processor:
+            closed = ctx.video_processor.closed_frames
+            yawn = ctx.video_processor.yawn_frames
             
-            time.sleep(0.5)
+            drowsy_ui.markdown(
+                f"""
+                <div class="metric-card">
+                    <div class="metric-value">{closed} <span class="metric-value-span">/ {CLOSED_FRAME_THRESHOLD}</span></div>
+                    <div class="metric-label">Eye Closure</div>
+                </div>
+                """, unsafe_allow_html=True
+            )
+            
+            yawn_ui.markdown(
+                f"""
+                <div class="metric-card">
+                    <div class="metric-value">{int(yawn)} <span class="metric-value-span">/ {YAWN_FRAME_THRESHOLD}</span></div>
+                    <div class="metric-label">Yawn Events</div>
+                </div>
+                """, unsafe_allow_html=True
+            )
+            
+            if closed >= CLOSED_FRAME_THRESHOLD or yawn >= YAWN_FRAME_THRESHOLD:
+                alert_type = "SLEEP DETECTED" if closed >= CLOSED_FRAME_THRESHOLD else "FATIGUE (YAWN)"
+                status_ui.markdown(f'<div class="status-alert">⚠️ {alert_type}</div>', unsafe_allow_html=True)
+                
+                if not st.session_state.alarm_on:
+                    st.session_state.alarm_on = True
+                    
+                    # Browser Web Speech API
+                    speech_text = "Drowsy detected." if closed >= CLOSED_FRAME_THRESHOLD else "Yawn detected."
+                    js_speech = f"""
+                    <script>
+                        var msg = new SpeechSynthesisUtterance("{speech_text}");
+                        var voices = window.speechSynthesis.getVoices();
+                        var maleVoice = voices.find(v => 
+                            v.name.toLowerCase().includes('male') || 
+                            v.name.toLowerCase().includes('david') || 
+                            v.name.toLowerCase().includes('mark')
+                        );
+                        if (maleVoice) {{
+                            msg.voice = maleVoice;
+                        }}
+                        msg.pitch = 0.8; 
+                        window.speechSynthesis.speak(msg);
+                    </script>
+                    """
+                    
+                    audio_html = get_audio_html("alarm.wav")
+                    audio_placeholder.markdown(audio_html + js_speech, unsafe_allow_html=True)
+            else:
+                st.session_state.alarm_on = False
+                audio_placeholder.empty()
+                status_ui.markdown('<div class="status-ok">WEBRTC SYSTEM NOMINAL</div>', unsafe_allow_html=True)
+        
+        # We avoid the 'while True' loop here because it can hang Streamlit Cloud.
+        # Streamlit will rerun this script automatically when state changes occur.
+        # To get real-time updates for metrics, we use a slower rerun or simply rely on the video feed.
+        # For professional real-time metric updates, adding st_autorefresh is recommended.
+        st.button("Update Telemetry", key="refresh_but")
 else:
     st.session_state.alarm_on = False
     audio_placeholder.empty()
