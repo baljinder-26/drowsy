@@ -332,23 +332,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -- MediaPipe Setup --
-@st.cache_resource
-def load_face_landmarker():
-    model_path = 'face_landmarker.task'
-    if not os.path.exists(model_path):
-        url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
-        urllib.request.urlretrieve(url, model_path)
-
-    base_options = mp_python.BaseOptions(model_asset_path=model_path)
-    options = vision.FaceLandmarkerOptions(
-        base_options=base_options,
-        output_face_blendshapes=False,
-        output_facial_transformation_matrixes=False,
-        num_faces=1
-    )
-    return vision.FaceLandmarker.create_from_options(options)
-
-face_mesh = load_face_landmarker()
+# face_mesh initialization moved inside VideoProcessor for thread safety on Streamlit Cloud
 
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE = [362, 385, 387, 263, 373, 380]
@@ -425,7 +409,13 @@ col_video, col_metrics, col_padding = st.columns([3, 1.2, 0.2], gap="large")
 col_video, col_metrics, col_padding = st.columns([3, 1.2, 0.2], gap="large")
 
 RTC_CONFIGURATION = RTCConfiguration(
-    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+    {"iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:stun1.l.google.com:19302"]},
+        {"urls": ["stun:stun2.l.google.com:19302"]},
+        {"urls": ["stun:stun3.l.google.com:19302"]},
+        {"urls": ["stun:stun4.l.google.com:19302"]},
+    ]}
 )
 
 with col_video:
@@ -446,8 +436,26 @@ class VideoProcessor:
         self.closed_frames = 0
         self.yawn_frames = 0
         self.alarm_on = False
+        self.face_mesh = None
+
+    def _setup_mesh(self):
+        if self.face_mesh is None:
+            model_path = 'face_landmarker.task'
+            if not os.path.exists(model_path):
+                url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+                urllib.request.urlretrieve(url, model_path)
+            
+            base_options = mp_python.BaseOptions(model_asset_path=model_path)
+            options = vision.FaceLandmarkerOptions(
+                base_options=base_options,
+                output_face_blendshapes=False,
+                output_facial_transformation_matrixes=False,
+                num_faces=1
+            )
+            self.face_mesh = vision.FaceLandmarker.create_from_options(options)
 
     def recv(self, frame):
+        self._setup_mesh()
         img = frame.to_ndarray(format="bgr24")
         img = cv2.resize(img, (800, 600))
         rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -459,7 +467,10 @@ class VideoProcessor:
 
         try:
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-            results = face_mesh.detect(mp_image)
+            if self.face_mesh:
+                results = self.face_mesh.detect(mp_image)
+            else:
+                return av.VideoFrame.from_ndarray(img, format="bgr24")
 
             if results.face_landmarks:
                 face_detected_last = True
@@ -511,19 +522,6 @@ class VideoProcessor:
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 with col_video:
-    if not run_app:
-        # Hide the WebRTC container visually when offline so we only see the customized offline warning
-        st.markdown("""
-        <style>
-            #drowsy-detector { display: none !important; }
-            iframe[title="streamlit_webrtc.webrtc_streamer"] { display: none !important; }
-        </style>
-        <div style='text-align: left; padding: 60px 40px; background: #0d1323; border-radius: 6px; border: 1px dashed rgba(0, 255, 204, 0.3); max-width: 100%;'>
-            <h2 style='color: #ffffff; font-size: 2rem; margin-bottom: 20px; font-weight: 800; letter-spacing: -1px;'>Scanner Offline</h2>
-            <p style='color: #94a3b8; font-size: 1.1rem; font-weight: 500;'>Initialize the scanner using the sidebar toggle to begin telemetry feed.</p>
-        </div>
-        """, unsafe_allow_html=True)
-
     # Always keep the component mounted in the DOM to prevent expensive hard-reloads of WebRTC modules
     ctx = webrtc_streamer(
         key="drowsy-detector",
@@ -535,11 +533,10 @@ with col_video:
             "audio": False
         },
         async_processing=True,
-        desired_playing_state=run_app
     )
 
 if run_app:
-    # Continuous loop to poll the video processor and update the Streamlit UI metrics and audio/speech
+    # Continuously display telemetry if the system is active
     if ctx and ctx.state.playing:
         if ctx.video_processor:
             closed = ctx.video_processor.closed_frames
@@ -596,11 +593,23 @@ if run_app:
                 audio_placeholder.empty()
                 status_ui.markdown('<div class="status-ok">WEBRTC SYSTEM NOMINAL</div>', unsafe_allow_html=True)
         
-        # We avoid the 'while True' loop here because it can hang Streamlit Cloud.
-        # Streamlit will rerun this script automatically when state changes occur.
-        # To get real-time updates for metrics, we use a slower rerun or simply rely on the video feed.
-        # For professional real-time metric updates, adding st_autorefresh is recommended.
-        st.button("Update Telemetry", key="refresh_but")
+        # Auto-refresh loop
+        # Note: For real-time background updates without interaction, add 'streamlit-autorefresh' to requirements.txt
+        # and uncomment the next line:
+        # from streamlit_autorefresh import st_autorefresh; st_autorefresh(interval=1000, key="framer")
+        
+        # Fallback button for manual telemetry sync
+        if st.button("Sync Telemetry Hub", key="refresh_but", use_container_width=True):
+            st.rerun()
 else:
+    # Offline display when scanner is not run
+    with col_video:
+        st.markdown("""
+        <div style='text-align: left; padding: 60px 40px; background: #0d1323; border-radius: 6px; border: 1px dashed rgba(0, 255, 204, 0.3); max-width: 100%;'>
+            <h2 style='color: #ffffff; font-size: 2rem; margin-bottom: 20px; font-weight: 800; letter-spacing: -1px;'>Scanner Offline</h2>
+            <p style='color: #94a3b8; font-size: 1.1rem; font-weight: 500;'>Initialize the scanner unit using the sidebar controller to begin telemetry feed.</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
     st.session_state.alarm_on = False
     audio_placeholder.empty()
