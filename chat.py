@@ -332,7 +332,16 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -- MediaPipe Setup --
-# face_mesh initialization moved inside VideoProcessor for thread safety on Streamlit Cloud
+@st.cache_resource
+def download_model():
+    model_path = 'face_landmarker.task'
+    if not os.path.exists(model_path):
+        with st.spinner("Downloading AI Telemetry Model..."):
+            url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+            urllib.request.urlretrieve(url, model_path)
+    return model_path
+
+MODEL_PATH = download_model()
 
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE = [362, 385, 387, 263, 373, 380]
@@ -415,6 +424,7 @@ RTC_CONFIGURATION = RTCConfiguration(
         {"urls": ["stun:stun2.l.google.com:19302"]},
         {"urls": ["stun:stun3.l.google.com:19302"]},
         {"urls": ["stun:stun4.l.google.com:19302"]},
+        {"urls": ["stun:stun.services.mozilla.com"]},
     ]}
 )
 
@@ -440,12 +450,7 @@ class VideoProcessor:
 
     def _setup_mesh(self):
         if self.face_mesh is None:
-            model_path = 'face_landmarker.task'
-            if not os.path.exists(model_path):
-                url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
-                urllib.request.urlretrieve(url, model_path)
-            
-            base_options = mp_python.BaseOptions(model_asset_path=model_path)
+            base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
             options = vision.FaceLandmarkerOptions(
                 base_options=base_options,
                 output_face_blendshapes=False,
@@ -457,7 +462,8 @@ class VideoProcessor:
     def recv(self, frame):
         self._setup_mesh()
         img = frame.to_ndarray(format="bgr24")
-        img = cv2.resize(img, (800, 600))
+        # Processing at lower resolution (640x480) for better cloud performance
+        img = cv2.resize(img, (640, 480))
         rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         h, w, _ = img.shape
         
@@ -529,10 +535,15 @@ with col_video:
         rtc_configuration=RTC_CONFIGURATION,
         video_processor_factory=VideoProcessor,
         media_stream_constraints={
-            "video": True, 
+            "video": {
+                "width": {"ideal": 640},
+                "height": {"ideal": 480},
+                "frameRate": {"ideal": 20}
+            }, 
             "audio": False
         },
         async_processing=True,
+        desired_playing_state=run_app
     )
 
 if run_app:
